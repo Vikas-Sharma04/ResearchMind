@@ -1,5 +1,4 @@
 import streamlit as st
-import time
 from agents import build_reader_agent, build_search_agent, writer_chain, critic_chain
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -341,6 +340,16 @@ def step_card(num: str, title: str, state: str):
 for key in ("results", "running", "done"):
     if key not in st.session_state:
         st.session_state[key] = {} if key == "results" else False
+if "error" not in st.session_state:
+    st.session_state.error = None
+
+
+def clear_chat():
+    st.session_state.results = {}
+    st.session_state.running = False
+    st.session_state.done = False
+    st.session_state.error = None
+    st.session_state.topic_input = ""
 
 
 # ── Hero ──────────────────────────────────────────────────────────────────────
@@ -386,11 +395,11 @@ topic = st.text_input(
     placeholder="e.g. Quantum computing breakthroughs in 2025",
     key="topic_input",
 )
-# Button is disabled if pipeline is currently running
+# Button stays disabled while the pipeline runs and after completion, until chat is cleared.
 run_btn = st.button(
     "⚡  Run Research Pipeline", 
     use_container_width=True, 
-    disabled=st.session_state.running
+    disabled=st.session_state.running or st.session_state.done
 )
 
 
@@ -402,53 +411,60 @@ if run_btn:
         st.session_state.results = {}
         st.session_state.running = True
         st.session_state.done = False
+        st.session_state.error = None
         st.rerun()
 
 if st.session_state.running and not st.session_state.done:
-    topic_val = st.session_state.topic_input
+    try:
+        topic_val = st.session_state.topic_input
 
-    # ── Step 1: Search ──
-    if "search" not in st.session_state.results:
-        with st.spinner("🔍  Search Agent is working…"):
-            search_agent = build_search_agent()
-            sr = search_agent.invoke({
-                "messages": [("user", f"Find recent, reliable and detailed information about: {topic_val}")]
-            })
-            st.session_state.results["search"] = sr["messages"][-1].content
-            st.rerun() 
+        # ── Step 1: Search ──
+        if "search" not in st.session_state.results:
+            with st.spinner("🔍  Search Agent is working…"):
+                search_agent = build_search_agent()
+                sr = search_agent.invoke({
+                    "messages": [("user", f"Find recent, reliable and detailed information about: {topic_val}")]
+                })
+                st.session_state.results["search"] = sr["messages"][-1].content
+                st.rerun()
 
-    # ── Step 2: Reader ──
-    if "reader" not in st.session_state.results:
-        with st.spinner("📄  Reader Agent is scraping top resources…"):
-            reader_agent = build_reader_agent()
-            rr = reader_agent.invoke({
-                "messages": [("user",
-                    f"Based on the following search results about '{topic_val}', pick relevant info:\n\n"
-                    f"{st.session_state.results['search'][:800]}"
-                )]
-            })
-            st.session_state.results["reader"] = rr["messages"][-1].content
-            st.rerun() 
+        # ── Step 2: Reader ──
+        if "reader" not in st.session_state.results:
+            with st.spinner("📄  Reader Agent is scraping top resources…"):
+                reader_agent = build_reader_agent()
+                rr = reader_agent.invoke({
+                    "messages": [("user",
+                        f"Based on the following search results about '{topic_val}', pick relevant info:\n\n"
+                        f"{st.session_state.results['search'][:800]}"
+                    )]
+                })
+                st.session_state.results["reader"] = rr["messages"][-1].content
+                st.rerun()
 
-    # ── Step 3: Writer ──
-    if "writer" not in st.session_state.results:
-        with st.spinner("✍️  Writer is drafting the report…"):
-            research_combined = f"SEARCH:\n{st.session_state.results['search']}\n\nREAD:\n{st.session_state.results['reader']}"
-            st.session_state.results["writer"] = writer_chain.invoke({
-                "topic": topic_val,
-                "research": research_combined
-            })
-            st.rerun() 
+        # ── Step 3: Writer ──
+        if "writer" not in st.session_state.results:
+            with st.spinner("✍️  Writer is drafting the report…"):
+                research_combined = f"SEARCH:\n{st.session_state.results['search']}\n\nREAD:\n{st.session_state.results['reader']}"
+                st.session_state.results["writer"] = writer_chain.invoke({
+                    "topic": topic_val,
+                    "research": research_combined
+                })
+                st.rerun()
 
-    # ── Step 4: Critic ──
-    if "critic" not in st.session_state.results:
-        with st.spinner("🧐  Critic is reviewing the report…"):
-            st.session_state.results["critic"] = critic_chain.invoke({
-                "report": st.session_state.results["writer"]
-            })
-            st.session_state.running = False
-            st.session_state.done = True
-            st.rerun() 
+        # ── Step 4: Critic ──
+        if "critic" not in st.session_state.results:
+            with st.spinner("🧐  Critic is reviewing the report…"):
+                st.session_state.results["critic"] = critic_chain.invoke({
+                    "report": st.session_state.results["writer"]
+                })
+                st.session_state.running = False
+                st.session_state.done = True
+                st.rerun()
+    except Exception as error:
+        st.session_state.error = f"{type(error).__name__}: {error}"
+        st.session_state.running = False
+        st.session_state.done = False
+        st.rerun()
 
 # ── Results display ───────────────────────────────────────────────────────────
 r = st.session_state.results
@@ -475,7 +491,7 @@ if r:
         st.download_button(
             label="⬇  Download Report (.md)",
             data=r["writer"],
-            file_name=f"research_report_{int(time.time())}.md",
+            file_name=f"research_report.md",
             mime="text/markdown",
         )
 
@@ -483,5 +499,11 @@ if r:
         st.markdown("""<div class="feedback-panel"><div class="panel-label green">🧐 Critic Feedback</div>""", unsafe_allow_html=True)
         st.markdown(r["critic"])
         st.markdown("</div>", unsafe_allow_html=True)
+
+if st.session_state.error:
+    st.error(f"Research failed: {st.session_state.error}")
+
+if st.session_state.done or st.session_state.error:
+    st.button("Clear Chat", on_click=clear_chat, use_container_width=True)
 
 st.markdown("""<div class="notice">ResearchMind · Powered by LangChain multi-agent pipeline · Built with Streamlit</div>""", unsafe_allow_html=True)
